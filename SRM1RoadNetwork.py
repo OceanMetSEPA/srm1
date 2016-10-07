@@ -40,7 +40,11 @@ class RoadNetwork(object):
     self.__beingCreated = True
 
     # Initiate a pandas dataframe with the correct columns.
-    self.geoDataFrame = gpd.GeoDataFrame(V)
+    if type(V) == gpd.geodataframe.GeoDataFrame:
+      self.geoDataFrame = V
+    else:
+      self.geoDataFrame = gpd.GeoDataFrame(V)
+
 
     self.emissionFactorName = emissionFactorName
     self.emissionFactors = emissionFactors
@@ -61,13 +65,20 @@ class RoadNetwork(object):
 
   @geoDataFrame.setter
   def geoDataFrame(self, v):
-    print 'geoDataFrame.setter called'
     self.__geoDataFrame = v
     # Some value checkers. Should probably add more.
-    Test = self.geoDataFrame['treeFactor']
+    # treeFactor
+    Test = self.__geoDataFrame['treeFactor']
     for Tu in Test.unique():
       if Tu not in self.__allowedTreeFactors:
         raise ValueError('Tree factor "{}" is not allowed.'.format(str(Tu)))
+    # roadClass - first just remove all spaces, then test.
+    self.__geoDataFrame['roadClass'] = [s.replace(" ", "") for s in list(self.geoDataFrame['roadClass'])]
+    Test = self.__geoDataFrame['roadClass']
+    for Tu in Test.unique():
+      if Tu not in self.__ImpactDistances.keys():
+        raise ValueError('roadClass "{}" is not allowed.'.format(str(Tu)))
+    # set the bounds.
     self.bounds = self.GetBounds()
 
   @property
@@ -222,16 +233,16 @@ class RoadNetwork(object):
 
     # Requires self for input checking.
 
-    # The default road segment is worst case.
-    DefaultD = {'roadID': 1, 'roadName': 'Unnamed Road',
-                'roadClass': 'NarrowCanyon', 'speedClass': 'Normal',
-                'speed': 10, 'width': 5, 'stagnation': 50, 'treeFactor': 1.5,}
+    ExpectedColumns = ['roadID', 'roadName', 'roadClass', 'speedClass',
+                       'speed', 'width', 'stagnation', 'treeFactor', 'geometry', 'vehicleCounts']
+    RemoveColumns = ['Bus_D', 'Heavy', 'Heavy_D', 'Light', 'Light_D', 'Medium_D',
+                     'Total', 'Total_D']
 
     # Define fieldnames which will be looked for within the shape file to
     # assign attributes.
     AttrNames = {}
     AttrNames['roadID'] = ['roadID', 'RoadID', 'OBJECTID']
-    AttrNames['roadName'] = ['roadName', 'RoadName', 'ROADNAME']
+    AttrNames['roadName'] = ['roadName', 'RoadName', 'ROADNAME', 'NAME']
     AttrNames['roadClass'] = ['roadName', 'Road_Type', 'RoadType', 'Road_Class', 'RoadClass']
     AttrNames['speedClass'] = ['speedClass', 'Speed_Clas', 'SpeedClass', 'Speed_Type', 'SpeedType']
     AttrNames['speed'] = ['speed', 'Speed', 'SPEED']
@@ -256,7 +267,7 @@ class RoadNetwork(object):
     # The default road segment is worst case.
     DefaultD = {'roadID': 1, 'roadName': 'Unnamed Road',
                 'roadClass': 'NarrowCanyon', 'speedClass': 'Normal',
-                'speed': 10, 'width': 5, 'stagnation': 50, 'treeFactor': 1.5}
+                'speed': 10, 'width': 5, 'stagnation': 0, 'treeFactor': 1.5}
 
     # The default vehicle counts object will be empty
     DefaultVC = {'MCycle': 0, 'Car': 0, 'LGV': 0, 'Bus': 0,
@@ -264,57 +275,61 @@ class RoadNetwork(object):
                  'AHGV_34X': 0, 'AHGV_5X': 0, 'AHGV_6X': 0,}
 
     # Read the shape file.
-    shpFile = gpd.read_file(filename)
-    shpKeys = shpFile.keys()
+    inputDataFrame = gpd.read_file(filename)
+    inputDataFrameKeys = inputDataFrame.keys()
 
-    UseAttrs = {}
+    #UseAttrs = {}
     for key, values in AttrNames.items():
       Got = False
       for v in values:
-        if v in shpKeys:
-          UseAttrs[key] = v
+        if v in inputDataFrameKeys:
+          #UseAttrs[key] = v
           Got = True
+          print 'Renaming column "{}" to "{}".'.format(v, key)
+          inputDataFrame.rename(columns={v: key}, inplace=True)
+          break
       if not Got:
         print 'No field found for attribute "{}"; default value "{}" will be used.'.format(key, DefaultD[key])
+        inputDataFrame[key] = DefaultD[key]*ones_like(inputDataFrame['geometry'])
 
     UseVehs = {}
     for key, values in VehNames.items():
       Got = False
       for v in values:
-        if v in shpKeys:
+        if v in inputDataFrameKeys:
           UseVehs[key] = v
           Got = True
       if not Got:
         print 'No field found for vehicle "{}"; default value of 0 will be used.'.format(key)
 
-    Ds = []
-    for index, rd in shpFile.iterrows():
+    VCs = []
+    for index, rd in inputDataFrame.iterrows():
       # For each road in the shape file.
       # Set up a VehicleCounts object.
       VC = DefaultVC
       for VehA, VehB in UseVehs.items():
         VC[VehA] = rd[VehB]
       VC = VehicleCounts(VC)
+      VCs.append(VC)
+    # Add the vehicle counts to the dataframe.
+    inputDataFrame['vehicleCounts'] = VCs
+    # Remove vehicle columns from dataframe.
+    for VehA, VehB in UseVehs.items():
+      del inputDataFrame[VehB]
 
-      # Create a dictionary for this road segment.
-      D = DefaultD.copy()
-      D['geometry'] = rd.geometry
-      D['vehicleCounts'] = VC
+    # Remove unwanted columns.
+    inputDataFrameKeys = inputDataFrame.keys()
+    for key in inputDataFrameKeys:
+      if key in RemoveColumns:
+        print 'Removing column "{}".'.format(key)
+        del inputDataFrame[key]
+    inputDataFrameKeys = inputDataFrame.keys()
 
-      AttKeys = UseAttrs.keys()
-      # Error checking.
-      for AttrA, AttrB in UseAttrs.items():
-        V = rd[AttrB]
-        if AttrA == 'roadClass':
-          V = V.replace(" ", "")
-        D[AttrA] = V
-      if 'roadID' in AttKeys:
-        rID = rd[UseAttrs['roadID']]
-      else:
-        rID = index
-      D['roadID'] = rID
-      # Add the dictionary to a list of dictionaries.
-      Ds.append(D)
-    # Create a dataframe from the list of dictionaries.
-    RN = RoadNetwork(Ds)
+    # Check that all expected columns are present.
+    inputDataFrameKeys = inputDataFrame.keys()
+    for col in ExpectedColumns:
+      if col not in inputDataFrameKeys:
+        raise ValueError('Column "{}" must be available.'.format(col))
+
+    RN = RoadNetwork(inputDataFrame)
     return RN
