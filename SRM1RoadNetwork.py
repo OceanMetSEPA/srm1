@@ -2,38 +2,112 @@
 """
 SRM1 Road Network
 
-Created on Tue Oct 04 12:15:08 2016
 
+
+
+Created on Tue Oct 04 12:15:08 2016
 @author: edward.barratt
 """
 from os import path
 
 import pandas as pd
 import geopandas as gpd
-from numpy import zeros_like, ones_like, reshape, array, append
+from numpy import zeros_like, ones_like
 from shapely.geometry import Point
 #from VehicleCounts import VehicleCounts
 #from EmissionFactors import EmissionFactorClass
 
-
+__notACanyonOptions = ['n', 'no', 'notacanyon', 'not a canyon']
+__oneSidedCanyonOptions = ['1-sided', '1sided', 'onesidedcanyon', 'one sided canyon']
+__wideCanyonOptions = ['widecanyon', 'wide canyon']
+__narrowCanyonOptions = ['narrowcanyon', 'narrow canyon']
+__decideCanyonOptions = ['y', 'yes']
 
 class RoadNetwork(object):
   """
-  Attributes:
-    geoDataFrame
-    emissionFactorName
-    emissionFactors
-    averageWindSpeed
+  An SRM1 RoadNetwork object.
 
+  Args:
+    geoDataFrame(str, or geopandas dataframe): A geopandas dataframe containing
+                            the details of the road network. It must contain a
+                            'geometry' field, and a number of other fields
+                            detailed below. If provided as a string, then the
+                            string will be assumed to be a path to a shapefile
+                            and the geoDataFrame will be read from the shape file.
+    treeFactorFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the tree factor for the
+                            road segment. This field must only contain values 1,
+                            1.25, or 1.5. If not provided then the user will be
+                            invited to specify a field, or to create one with
+                            default value of 1.
+    isCanyonFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents whether or not the road
+                            segment is a canyon. This column can contain any of
+                            the following values:  ['n', 'no', 'notacanyon',
+                            'not a canyon', '1-sided', '1sided', 'onesidedcanyon',
+                            'one sided canyon', 'widecanyon', 'wide canyon',
+                            'narrowcanyon', 'narrow canyon', 'y', 'yes']. If the
+                            value is either 'y' or 'yes' then the nature of the
+                            canyon (wide, narrow, or not a canyon) will be
+                            determined by the roadWidth field and the
+                            canyonDepth field. If not provided then the user
+                            will be invited to specify a field.
+    roadWidthFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the road width, in
+                            meters. The field should contain numeric values.
+                            These values are used to calculate road side
+                            concentrations and to determine the canyon type of
+                            roads (isCanyonFieldName). If not provided then the
+                            user will be invited to specify a field.
+    canyonDepthFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the canyon depth, in
+                            meters. The field should contain numeric values.
+                            These values are used to determine the canyon type
+                            of roads (isCanyonFieldName). If not provided then the
+                            user will be invited to specify a field, or to
+                            create one with default value of 1; this last option
+                            is not recomended if the isCanyon field contains
+                            values 'y' or 'yes', see above for details.
+    NOxEmissionFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the NOx emissions,
+                            in g/km. The field should contain numeric values. If
+                            not provided then the user will be invited to
+                            specify a field.
+    NO2EmissionFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the NO2 emissions,
+                            in g/km. The field should contain numeric values. If
+                            not provided then the user will be invited to
+                            specify a field. Note that both NO2 and NOx
+                            emissions must be specified in order to calculate
+                            NO2 concentrations.
+    PM10EmissionFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the PM10 emissions,
+                            in g/km. The field should contain numeric values. If
+                            not provided then the user will be invited to
+                            specify a field.
+    PM25EmissionFieldName(str, optional): The name of the field within the
+                            geoDataFrame that represents the PM2.5 emissions,
+                            in g/km. The field should contain numeric values. If
+                            not provided then the user will be invited to
+                            specify a field.
+    backgroundConcentrations(dict, or the string 'AllZero', optional): A
+                            dictionary containing the background concentrations
+                            of the pollutants of interest. If NO2 concentrations
+                            are to be calculated then a background O3
+                            concentration is also required. Units are ug/m3. If
+                            'AllZero', then all background concentrations will
+                            be zero. Default 'AllZero'.
   """
+
+  # Define some internal defaults for the class
   __DispersionCoefficientsAll = {'NarrowCanyon':   {'A': 0.000488, 'B': -0.0308, 'C': 0.59, 'Alpha': 0},
                                  'WideCanyon':     {'A': 0.000325, 'B': -0.0205, 'C': 0.39, 'Alpha': 0.856},
                                  'OneSidedCanyon': {'A': 0.000500, 'B': -0.0316, 'C': 0.57, 'Alpha': 0},
                                  'NotACanyon':     {'A': 0.000310, 'B': -0.0182, 'C': 0.33, 'Alpha': 0.799}}
   __impactDists = {'NarrowCanyon': 30,
-                       'WideCanyon': 60,
-                       'OneSidedCanyon': 30,
-                       'NotACanyon': 60}
+                   'WideCanyon': 60,
+                   'OneSidedCanyon': 30,
+                   'NotACanyon': 60}
   __constants = {'B': 0.6, 'K': 100}
   __allowedTreeFactors = [1, 1.25, 1.5]
   __autoCreatedFields = {}
@@ -50,11 +124,6 @@ class RoadNetwork(object):
                isCanyonFieldName=None,
                roadWidthFieldName=None,
                canyonDepthFieldName=None):
-    """
-
-    required: isCanyonFieldName, roadWidthFieldName
-
-    """
 
     self.__beingCreated = True
 
@@ -85,8 +154,6 @@ class RoadNetwork(object):
 
   @geoDataFrame.setter
   def geoDataFrame(self, v):
-    print('geoDataFrame.setter called.')
-
     if not self.__beingCreated:
       raise IOError('geoDataFrame cannot be reset.')
     if isinstance(v, str):
@@ -113,18 +180,18 @@ class RoadNetwork(object):
     else:
       self.__autoCreatedFields['treefactor'] = 1
 
+    # is canyon
+    self.isCanyonFieldName, v = getFieldName(v, initialFN=self.isCanyonFieldName, options=colNames, name='canyon class', defaultName='canyon class', defaultValue='narrow canyon', canIgnore=False)
+    if self.isCanyonFieldName in colNames:
+      colNames.remove(self.isCanyonFieldName)
     # road Width
     self.roadWidthFieldName, v = getFieldName(v, initialFN=self.roadWidthFieldName, options=colNames, name='road width', canIgnore=False)
     if self.roadWidthFieldName in colNames:
       colNames.remove(self.roadWidthFieldName)
     # road Depth
-    self.canyonDepthFieldName, v = getFieldName(v, initialFN=self.canyonDepthFieldName, options=colNames, name='canyon depth', canIgnore=False)
+    self.canyonDepthFieldName, v = getFieldName(v, initialFN=self.canyonDepthFieldName, options=colNames, name='canyon depth', canIgnore=True)
     if self.canyonDepthFieldName in colNames:
       colNames.remove(self.canyonDepthFieldName)
-    # is canyon
-    self.isCanyonFieldName, v = getFieldName(v, initialFN=self.isCanyonFieldName, options=colNames, name='canyon class', canIgnore=False)
-    if self.isCanyonFieldName in colNames:
-      colNames.remove(self.isCanyonFieldName)
     v = canyonDeciderAll(v, 'roadclass_c', self.isCanyonFieldName, self.roadWidthFieldName, self.canyonDepthFieldName)
     self.roadClassFieldNames = 'roadclass_c'
 
@@ -181,6 +248,23 @@ class RoadNetwork(object):
     self.__backgroundConcentration = v
     self.CalculateRoadConcentrations()
 
+  ## Some helper functions for setting up the geodataframe.
+
+  def checkValues(self, geodataframe):
+    # Test values for tree factor
+    Test = geodataframe[self.treeFactorFieldName]
+    for Tu in Test.unique():
+      if Tu not in self.__allowedTreeFactors:
+        raise ValueError('Tree factor "{}" is not allowed.'.format(str(Tu)))
+    # Should add more tests.
+
+
+
+
+
+
+
+
   def CalculatePointConcentrations(self, points, saveloc=None, head=False):
 
     if isinstance(points, str):
@@ -224,8 +308,6 @@ class RoadNetwork(object):
     return points
     #points.apply(lambda row: self.CalculatePointConcentration(row), axis=1)
 
-  def toFile(self, saveloc):
-    self.geoDataFrame.to_file(saveloc, crs_wkt=self.crs_wkt)
 
   def CalculatePointConcentration(self, point, pols=None, roads_impacting=None, closest_only=False):
     if pols is None:
@@ -267,7 +349,6 @@ class RoadNetwork(object):
         v = roads_impacting['FullFactor']*roads_impacting[colname]
         pt[PCName] = v.sum()
     return pt
-
 
   def RoadsImpactingPoint(self, point, closest_only=False):
     """
@@ -423,15 +504,51 @@ class RoadNetwork(object):
     print('{} roads imported. There are now {} roads in total.'.format(len(v.index), len(vall.index)))
     self.CalculateRoadConcentrations()
 
-  def checkValues(self, geodataframe):
+  def toFile(self, saveloc):
+    """
+    Save the geodataframe to a shapefile.
+    This will save the complete geodataframe, with the calculated concentration
+    fields, etc.
 
-    # Test values for tree factor
-    Test = geodataframe[self.treeFactorFieldName]
-    for Tu in Test.unique():
-      if Tu not in self.__allowedTreeFactors:
-        raise ValueError('Tree factor "{}" is not allowed.'.format(str(Tu)))
+    args:
+      saveloc (str): The path where the shape file is to be saved.
+    """
+    self.geoDataFrame.to_file(saveloc, crs_wkt=self.crs_wkt)
 
-    # Should add more.
+## Other helper functions
+def canyonDeciderAll(DF, newColName, IsCanyonFN, CanyonDepthFN, CanyonWidthFN):
+  if all([CanyonDepthFN, CanyonWidthFN]):
+    DF[newColName] = DF.apply(lambda row: canyonDecider(row[IsCanyonFN],
+                                                        row[CanyonDepthFN],
+                                                        row[CanyonWidthFN]),
+                                          axis=1)
+  else:
+    DF[newColName] = DF.apply(lambda row: canyonDecider(row[IsCanyonFN], None, None), axis=1)
+  return DF
+
+def canyonDecider(IsCanyon, CanyonDepth, CanyonWidth):
+  if IsCanyon.lower() in __notACanyonOptions:
+    return 'NotACanyon'
+  elif IsCanyon.lower() in __oneSidedCanyonOptions:
+    return 'OneSidedCanyon'
+  elif IsCanyon.lower() in __wideCanyonOptions:
+    return 'WideCanyon'
+  elif IsCanyon.lower() in __narrowCanyonOptions:
+    return 'NarrowCanyon'
+  elif IsCanyon.lower() in __decideCanyonOptions:
+    if all([CanyonDepth, CanyonWidth]):
+      decider = CanyonWidth/(2*CanyonDepth)
+      if decider >= 3:
+        return 'NotACanyon'
+      elif decider < 1.5:
+        return 'NarrowCanyon'
+      else: # Between 1.5 and 3
+        return 'WideCanyon'
+    else:
+      # Default is NarrowCanyon
+      return 'NarrowCanyon'
+  else:
+    raise ValueError('IsCanyon value {} is not understood.'.format(IsCanyon))
 
 def getFieldName(data, initialFN=None, options=None, defaultName=None, defaultValue=None, name='unnamed', canIgnore=True, questionString=None):
 
@@ -487,41 +604,6 @@ def getFieldName(data, initialFN=None, options=None, defaultName=None, defaultVa
     fName = options[num-1]
 
   return fName, data
-
-def canyonDeciderAll(DF, newColName, IsCanyonFN, CanyonDepthFN, CanyonWidthFN):
-  if all([CanyonDepthFN, CanyonWidthFN]):
-    DF[newColName] = DF.apply(lambda row: canyonDecider(row[IsCanyonFN],
-                                                        row[CanyonDepthFN],
-                                                        row[CanyonWidthFN]),
-                                          axis=1)
-  else:
-    DF[newColName] = DF.apply(lambda row: canyonDecider(row[IsCanyonFN], None, None), axis=1)
-  return DF
-
-def canyonDecider(IsCanyon, CanyonDepth, CanyonWidth):
-  if IsCanyon.lower() in ['n', 'no', 'notacanyon', 'not a canyon']:
-    return 'NotACanyon'
-  elif IsCanyon.lower() in ['1-sided', '1sided', 'onesidedcanyon', 'one sided canyon']:
-    return 'OneSidedCanyon'
-  elif IsCanyon.lower() in ['widecanyon', 'wide canyon']:
-    return 'WideCanyon'
-  elif IsCanyon.lower() in ['narrowcanyon', 'narrow canyon']:
-    return 'NarrowCanyon'
-  elif IsCanyon.lower() in ['y', 'yes']:
-    if all([CanyonDepth, CanyonWidth]):
-      decider = CanyonWidth/(2*CanyonDepth)
-      if decider >= 3:
-        return 'NotACanyon'
-      elif decider < 1.5:
-        return 'NarrowCanyon'
-      else: # Between 1.5 and 3
-        return 'WideCanyon'
-    else:
-      # Default is NarrowCanyon
-      return 'NarrowCanyon'
-  else:
-    raise ValueError('IsCanyon value {} is not understood.'.format(IsCanyon))
-
 
 if __name__ == '__main__':
   rdsshpfile = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\Glasgow\\"
