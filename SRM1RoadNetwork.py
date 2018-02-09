@@ -30,19 +30,23 @@ class RoadNetwork(object):
                                  'WideCanyon':     {'A': 0.000325, 'B': -0.0205, 'C': 0.39, 'Alpha': 0.856},
                                  'OneSidedCanyon': {'A': 0.000500, 'B': -0.0316, 'C': 0.57, 'Alpha': 0},
                                  'NotACanyon':     {'A': 0.000310, 'B': -0.0182, 'C': 0.33, 'Alpha': 0.799}}
-  __ImpactDistances = {'NarrowCanyon': 30,
+  __impactDists = {'NarrowCanyon': 30,
                        'WideCanyon': 60,
                        'OneSidedCanyon': 30,
                        'NotACanyon': 60}
   __constants = {'B': 0.6, 'K': 100}
   __allowedTreeFactors = [1, 1.25, 1.5]
+  __autoCreatedFields = {}
+  __maxRoadsPerCalcPoint = 2
 
-  def __init__(self, roadnetwork, averageWindSpeed=5,
+  def __init__(self, roadnetwork,
+               averageWindSpeed=5,
                backgroundConcentration='AllZero',
-               treefactorFieldName=None,
+               treeFactorFieldName=None,
                NOxEmissionFieldName=None,
                NO2EmissionFieldName=None,
-               otherChemsEmissionFieldNames=[None],
+               PM10EmissionFieldName=None,
+               PM25EmissionFieldName=None,
                isCanyonFieldName=None,
                roadWidthFieldName=None,
                canyonDepthFieldName=None):
@@ -55,10 +59,11 @@ class RoadNetwork(object):
     self.__beingCreated = True
 
     # Get the defaults.
-    self.treeFactorFieldName = treefactorFieldName
+    self.treeFactorFieldName = treeFactorFieldName
     self.NOxEmissionFieldName = NOxEmissionFieldName
     self.NO2EmissionFieldName = NO2EmissionFieldName
-    self.otherChemsEmissionFieldNames = otherChemsEmissionFieldNames
+    self.PM10EmissionFieldName = PM10EmissionFieldName
+    self.PM25EmissionFieldName = PM25EmissionFieldName
     self.isCanyonFieldName = isCanyonFieldName
     self.roadWidthFieldName = roadWidthFieldName
     self.canyonDepthFieldName = canyonDepthFieldName
@@ -71,7 +76,7 @@ class RoadNetwork(object):
     self.backgroundConcentration = backgroundConcentration
     self.__beingCreated = False
     #self.CalculateEmissions()      # Will create a column 'emissions_Pol' for each pollutant Pol.
-    self.CalculateRoadConcentrations()  # Will create a column 'concentration_Pol' for each pollutant Pol.
+    self.CalculateRoadConcentrations()  # Will create a column 'conc_Pol' for each pollutant Pol.
     #self.bounds = self.GetBounds()
 
   @property
@@ -82,85 +87,74 @@ class RoadNetwork(object):
   def geoDataFrame(self, v):
     print('geoDataFrame.setter called.')
 
+    if not self.__beingCreated:
+      raise IOError('geoDataFrame cannot be reset.')
     if isinstance(v, str):
       # Assume it's a shape file.
+
+      prj_file = v.replace('.shp', '.prj')
+      crs_wkt = [l.strip() for l in open(prj_file,'r')][0]
+      self.crs_wkt = crs_wkt
       v = gpd.read_file(v)
     elif isinstance(v, gpd.geodataframe.GeoDataFrame):
       pass
     else:
+      print(v)
+      print(type(v))
       raise ValueError('Unknown type for geoDataFrame.')
 
-    # Some value checkers. Should probably add more.
+    # make sure that required fields are recognised.
     colNames = list(v)
+    self.originalColNames = colNames.copy()
     # Tree Factor.
-    self.treeFactorFieldName, v = getFieldName(self.treeFactorFieldName, v, possibilities=['treefactor', 'tree'], defaultName='treefactor', defaultValue=1, name='tree factor')
-    # Test values for tree factor
-    Test = v[self.treeFactorFieldName]
-    for Tu in Test.unique():
-      if Tu not in self.__allowedTreeFactors:
-        raise ValueError('Tree factor "{}" is not allowed.'.format(str(Tu)))
+    self.treeFactorFieldName, v = getFieldName(v, initialFN=self.treeFactorFieldName, options=colNames, defaultName='treefactor', defaultValue=1, name='tree factor', canIgnore=False)
+    if self.treeFactorFieldName in colNames:
+      colNames.remove(self.treeFactorFieldName)
+    else:
+      self.__autoCreatedFields['treefactor'] = 1
 
     # road Width
-    self.roadWidthFieldName, v = getFieldName(self.roadWidthFieldName, v, possibilities=['roadwidth', 'width'], name='road width', required=True)
+    self.roadWidthFieldName, v = getFieldName(v, initialFN=self.roadWidthFieldName, options=colNames, name='road width', canIgnore=False)
+    if self.roadWidthFieldName in colNames:
+      colNames.remove(self.roadWidthFieldName)
     # road Depth
-    self.canyonDepthFieldName, v = getFieldName(self.canyonDepthFieldName, v, possibilities=['canyon', 'depth'], name='canyon depth', required=False)
+    self.canyonDepthFieldName, v = getFieldName(v, initialFN=self.canyonDepthFieldName, options=colNames, name='canyon depth', canIgnore=False)
+    if self.canyonDepthFieldName in colNames:
+      colNames.remove(self.canyonDepthFieldName)
     # is canyon
-    self.isCanyonFieldName, v = getFieldName(self.isCanyonFieldName, v, possibilities=['is_canyon', 'iscanyon', 'roadclass'], name='canyon class', required=True)
+    self.isCanyonFieldName, v = getFieldName(v, initialFN=self.isCanyonFieldName, options=colNames, name='canyon class', canIgnore=False)
+    if self.isCanyonFieldName in colNames:
+      colNames.remove(self.isCanyonFieldName)
     v = canyonDeciderAll(v, 'roadclass_c', self.isCanyonFieldName, self.roadWidthFieldName, self.canyonDepthFieldName)
     self.roadClassFieldNames = 'roadclass_c'
 
-    # NOx Emissions
     avPols = {}
-    if self.NOxEmissionFieldName is None:
-      # None defined, test a few obvious possibilities.
-      tests = ['nox (g/km)', 'nox emissions (g/km)', 'eft nox (g']
-      gotNOx = False
-      for colName in colNames:
-        if colName.lower()[:10] in tests:
-          print('NOx Emissions field name discovered: {}.'.format(colName))
-          self.NOxEmissionFieldName = colName
-          avPols['NOx'] = colName
-          gotNOx = True
-          break
-      if not gotNOx:
-        print('No NOx emissions found.')
-    # NO2 Emissions
-    if self.NO2EmissionFieldName is None:
-      # None defined, test a few obvious possibilities.
-      tests = ['no2 (g/km)', 'no2 emissi', 'eft no2 (g']
-      gotNO2 = False
-      for colName in colNames:
-        if colName.lower()[:10] in tests:
-          print('NO2 Emissions field name discovered: {}.'.format(colName))
-          self.NO2EmissionFieldName = colName
-          avPols['NO2'] = colName
-          gotNO2 = True
-          break
-      if not gotNO2:
-        print('No NO2 emissions found.')
-      else:
-        if not gotNOx:
-          raise ValueError(("NO2 emissions detected, but no NOx. SRM1 cannot "
-                            "calculate NO2 concentrations without both NOx "
-                            "and NO2 emissions."))
-    # other Chemicals
-    if self.otherChemsEmissionFieldNames[0] is None:
-      # None defined, test a few obvious possibilities.
-      otherChemTests = {'PM10': ['pm10 (g/km', 'pm10 emiss', 'eft pm10 ('],
-                        'PM25': ['pm25 (g/km', 'pm25 emiss', 'pm2.5 (g/k', 'pm2.5 emis', 'eft pm25 (', 'eft pm25 (', 'eft pm2.5']}
-      gotOther = False
-      self.otherChemsEmissionFieldNames = []
-      for colName in colNames:
-        for pol, tests in otherChemTests.items():
-          if colName.lower()[:10] in tests:
-            print('{} emissions field name discovered: {}.'.format(pol, colName))
-            self.otherChemsEmissionFieldNames.append(colName)
-            avPols[pol] = colName
-            gotOther = True
-      if (not gotNOx) and (not gotOther):
-        raise ValueError("No chemical emission fields are recognised.")
+    # NOx Emissions
+    self.NOxEmissionFieldName, v = getFieldName(v, initialFN=self.NOxEmissionFieldName, options=colNames, name='NOx Emission Rate (g/km)', canIgnore=True)
+    if self.NOxEmissionFieldName in colNames:
+      colNames.remove(self.NOxEmissionFieldName)
+      avPols['NOx'] = self.NOxEmissionFieldName
+      # NO2 Emissions, can't do without NOx
+      self.NO2EmissionFieldName, v = getFieldName(v, initialFN=self.NO2EmissionFieldName, options=colNames, name='NO2 Emission Rate (g/km)', canIgnore=True)
+      if self.NO2EmissionFieldName is not None:
+        avPols['NO2'] = self.NO2EmissionFieldName
+    # PM10 Emissions
+    self.PM10EmissionFieldName, v = getFieldName(v, initialFN=self.PM10EmissionFieldName, options=colNames, name='PM10 Emission Rate (g/km)', canIgnore=True)
+    if self.PM10EmissionFieldName in colNames:
+      colNames.remove(self.PM10EmissionFieldName)
+      avPols['PM10'] = self.PM10EmissionFieldName
+   # PM25 Emissions
+    self.PM25EmissionFieldName, v = getFieldName(v, initialFN=self.PM25EmissionFieldName, options=colNames, name='PM2.5 Emission Rate (g/km)', canIgnore=True)
+    if self.PM25EmissionFieldName in colNames:
+      colNames.remove(self.PM25EmissionFieldName)
+      avPols['PM25'] = self.PM25EmissionFieldName
 
+    if len(avPols.keys()) == 0:
+      raise ValueError("No chemical emission fields are recognised.")
+
+    self.checkValues(v)
     self.__geoDataFrame = v
+    print('{} roads imported.'.format(len(v.index)))
     self.availablePollutants = avPols
     #self.bounds = self.geoDataFrame.total_bounds
 
@@ -186,26 +180,6 @@ class RoadNetwork(object):
       v['O3'] = 0
     self.__backgroundConcentration = v
     self.CalculateRoadConcentrations()
-
-  """
-  def set_value(self, indices, col, values):
-    changeableColumnsNoEffect = ['roadID', 'roadName']
-    changeableColumnsReCalculate = ['roadClass', 'width', 'treeFactor',
-                                    'speedClass', 'speed', 'stagnation']
-    if col not in changeableColumnsNoEffect + changeableColumnsReCalculate:
-      raise ValueError('You cannot change column "{}".'.format(col))
-    else:
-      if not isinstance(indices, list):
-        indices = [indices]
-      if not isinstance(values, list):
-        values = [values]*len(indices)
-      # Change the values
-      for ii, ix in enumerate(indices):
-        self.geoDataFrame.set_value(ix, col, values[ii])
-      if col in changeableColumnsReCalculate:
-        self.CalculateEmissions()
-        self.CalculateRoadConcentrations()
-   """
 
   def CalculatePointConcentrations(self, points, saveloc=None, head=False):
 
@@ -239,13 +213,19 @@ class RoadNetwork(object):
       for colname in colnames:
         points.iloc[ri, points.columns.get_loc(colname)] = pt_conc[colname].values
       points.iloc[ri, points.columns.get_loc('Roads')] = ', '.join(pt_conc['Roads'].values)
+    print('Calculation of point concentrations complete.')
 
+    # Add the background concentration
+    for pol in self.availablePollutants.keys():
+      points['PEC_{}'.format(pol)] = points['PC_{}'.format(pol)] + self.backgroundConcentration[pol]
 
     if saveloc is not None:
       points.to_file(saveloc, driver='ESRI Shapefile', crs_wkt=crs_wkt)
     return points
     #points.apply(lambda row: self.CalculatePointConcentration(row), axis=1)
 
+  def toFile(self, saveloc):
+    self.geoDataFrame.to_file(saveloc, crs_wkt=self.crs_wkt)
 
   def CalculatePointConcentration(self, point, pols=None, roads_impacting=None, closest_only=False):
     if pols is None:
@@ -254,13 +234,13 @@ class RoadNetwork(object):
     if roads_impacting is None:
       pt, roads_impacting = self.RoadsImpactingPoint(point, closest_only=closest_only)
 
-      DispFactor = (roads_impacting['dispersionCoefficient_C'] +
-                    roads_impacting['dispersionCoefficient_B'] * roads_impacting['distance_point'] +
-                    roads_impacting['dispersionCoefficient_A'] * roads_impacting['distance_point']**2)
-      DispFactorB = roads_impacting['dispersionCoefficient_Alpha'] * roads_impacting['distance_point']**(-0.747)
-      DispFactorB[roads_impacting['dispersionCoefficient_Alpha'] == 0] = 0
+      DispFactor = (roads_impacting['dispC_C'] +
+                    roads_impacting['dispC_B'] * roads_impacting['distance_point'] +
+                    roads_impacting['dispC_A'] * roads_impacting['distance_point']**2)
+      DispFactorB = roads_impacting['dispC_Ap'] * roads_impacting['distance_point']**(-0.747)
+      DispFactorB[roads_impacting['dispC_Ap'] == 0] = 0
       DispFactor[roads_impacting['distance_point'] > 30] = DispFactorB[roads_impacting['distance_point'] > 30]
-      DispFactor[roads_impacting['distance_point'] > roads_impacting['impactDistance']] = 0
+      DispFactor[roads_impacting['distance_point'] > roads_impacting['impactDist']] = 0
       DispFactor = DispFactor * 0.62 * 5 * roads_impacting[self.treeFactorFieldName] / self.averageWindSpeed
       roads_impacting['FullFactor'] = (1000/(24.0*3600))*DispFactor
 
@@ -302,11 +282,17 @@ class RoadNetwork(object):
     # Get the distance of all roads to this point.
     roads_int = self.geoDataFrame.copy()
     roads_int['distance_point'] = roads_int.geometry.apply(lambda g: pt.distance(g))
-    roads_int = roads_int[roads_int['distance_point'] < roads_int['impactDistance']].copy()
+    roads_int = roads_int[roads_int['distance_point'] < roads_int['impactDist']].copy()
     roads_int = roads_int.sort_values(by=['distance_point'])
 
     if closest_only:
       roads_int = roads_int.head(1)
+    else:
+      # Keep only the first few roads (usually 2, controlled by __maxRoadsPerCalcPoint)
+      # This aims to prevent double counting. At a cross roads it probably makes
+      # sense to count two roads, but not all 4, for example. There will still be
+      # some double counting where two paralel segments of the same road meet.
+      roads_int = roads_int.head(self.__maxRoadsPerCalcPoint)
 
     pt['numRoads'] = len(roads_int.index)
     pt['Roads'] = ', '.join(list([str(x) for x in roads_int.index]))
@@ -318,16 +304,16 @@ class RoadNetwork(object):
     if self.__beingCreated:
       return
 
-    ImpactDistances = [self.__ImpactDistances[s] for s in list(self.geoDataFrame[self.roadClassFieldNames])]
-    self.geoDataFrame['impactDistance'] = ImpactDistances
+    impactDists = [self.__impactDists[s] for s in list(self.geoDataFrame[self.roadClassFieldNames])]
+    self.geoDataFrame['impactDist'] = impactDists
     DispersionCoefficientA = [self.__DispersionCoefficientsAll[s]['A'] for s in list(self.geoDataFrame[self.roadClassFieldNames])]
-    self.geoDataFrame['dispersionCoefficient_A'] = DispersionCoefficientA
+    self.geoDataFrame['dispC_A'] = DispersionCoefficientA
     DispersionCoefficientB = [self.__DispersionCoefficientsAll[s]['B'] for s in list(self.geoDataFrame[self.roadClassFieldNames])]
-    self.geoDataFrame['dispersionCoefficient_B'] = DispersionCoefficientB
+    self.geoDataFrame['dispC_B'] = DispersionCoefficientB
     DispersionCoefficientC = [self.__DispersionCoefficientsAll[s]['C'] for s in list(self.geoDataFrame[self.roadClassFieldNames])]
-    self.geoDataFrame['dispersionCoefficient_C'] = DispersionCoefficientC
+    self.geoDataFrame['dispC_C'] = DispersionCoefficientC
     DispersionCoefficientAlpha = [self.__DispersionCoefficientsAll[s]['Alpha'] for s in list(self.geoDataFrame[self.roadClassFieldNames])]
-    self.geoDataFrame['dispersionCoefficient_Alpha'] = DispersionCoefficientAlpha
+    self.geoDataFrame['dispC_Ap'] = DispersionCoefficientAlpha
 
     DD = self.geoDataFrame[self.roadWidthFieldName]/2
     if distance == 'RoadEdge':
@@ -338,13 +324,13 @@ class RoadNetwork(object):
       distance = distance * ones_like(DD)
     distance = distance * distanceMultiply + distanceAdd
 
-    DispFactor = (self.geoDataFrame['dispersionCoefficient_C'] +
-                  self.geoDataFrame['dispersionCoefficient_B'] * distance +
-                  self.geoDataFrame['dispersionCoefficient_A'] * distance**2)
-    DispFactorB = self.geoDataFrame['dispersionCoefficient_Alpha'] * distance**(-0.747)
-    DispFactorB[self.geoDataFrame['dispersionCoefficient_Alpha'] == 0] = 0
+    DispFactor = (self.geoDataFrame['dispC_C'] +
+                  self.geoDataFrame['dispC_B'] * distance +
+                  self.geoDataFrame['dispC_A'] * distance**2)
+    DispFactorB = self.geoDataFrame['dispC_Ap'] * distance**(-0.747)
+    DispFactorB[self.geoDataFrame['dispC_Ap'] == 0] = 0
     DispFactor[distance > 30] = DispFactorB[distance > 30]
-    DispFactor[distance > self.geoDataFrame['impactDistance']] = 0
+    DispFactor[distance > self.geoDataFrame['impactDist']] = 0
     #print distance
     DispFactor = DispFactor * 0.62 * 5 * self.geoDataFrame[self.treeFactorFieldName] / self.averageWindSpeed
 
@@ -352,51 +338,155 @@ class RoadNetwork(object):
 
     # Do NOx first.
     if 'NOx' in AvPols.keys():
-      self.geoDataFrame['concentration_NOx'] = (1000/(24*3600))*DispFactor*self.geoDataFrame[AvPols['NOx']] + self.backgroundConcentration['NOx']
+      #self.geoDataFrame['conc_NOx']
+      PCNOX = (1000/(24*3600))*DispFactor*self.geoDataFrame[AvPols['NOx']]
     # then NO2
     if 'NO2' in AvPols.keys():
       fNO2 = self.geoDataFrame[AvPols['NO2']]/self.geoDataFrame[AvPols['NOx']]
 
-      q = self.geoDataFrame['concentration_NOx']*(1-fNO2)
+      q = PCNOX*(1-fNO2)
       w = q/(q+self.__constants['K'])
       e = self.__constants['B']*self.backgroundConcentration['O3']*w
-      self.geoDataFrame['concentration_NOx'] = fNO2*self.geoDataFrame['concentration_NOx'] + e
-
+      self.geoDataFrame['conc_NO2'] = fNO2*PCNOX + e + self.backgroundConcentration['NO2']
+    if 'NOx' in AvPols.keys():
+      self.geoDataFrame['conc_NOx'] = PCNOX + self.backgroundConcentration['NOx']
     for Pol, FName in AvPols.items():
       if Pol in ['NOx', 'NO2']:
         continue
-      self.geoDataFrame['concentration_{}'.format(Pol)] = (1000/(24*3600))*DispFactor*self.geoDataFrame[FName] + self.backgroundConcentration[Pol]
+      self.geoDataFrame['conc_{}'.format(Pol)] = (1000/(24*3600))*DispFactor*self.geoDataFrame[FName] + self.backgroundConcentration[Pol]
 
-def getFieldName(initialFN, data, possibilities=[], defaultName=None, defaultValue=None, required=False, name='unnamed'):
-  colNames = list(data)
-  if initialFN is None:
-    got = False
-    for colName in colNames:
-      if colName.lower() in possibilities:
-        print('Field name discovered for {}: {}.'.format(name, colName))
-        FName = colName
-        got = True
-        break
-    if not got:
-      if defaultName is None:
-        if required:
-          raise ValueError('No field name assigned for {}'.format(name))
-        else:
-          FName = None
-      else:
-        print('No field name assigned for {}. Creating field {} with initial value {}.'.format(name, defaultName, defaultValue))
-        if defaultName in colNames:
-          raise ValueError('A field named {} already exists.'.format(defaultName))
-        else:
-          data[defaultName] = defaultValue
-          FName = defaultName
-  else:
-    if initialFN not in colNames:
-      raise ValueError("The assigned field name for {}, '{}', is not present in the data.".format(name, initialFN))
+  def addRoads(self, v):
+
+    if isinstance(v, str):
+      # Assume it's a shape file.
+      v = gpd.read_file(v)
+    elif isinstance(v, gpd.geodataframe.GeoDataFrame):
+      pass
     else:
-      FName = initialFN
-  return FName, data
+      raise ValueError('Unknown type for geoDataFrame.')
 
+    print('Adding new roads to existing road network.')
+    # Check which columns match those columns from the existing network.
+    newColNames = list(v)
+    origColNames = self.originalColNames
+
+    matches = []
+    origmissing = []
+    newmissing = []
+    for cn in origColNames:
+      if cn in newColNames:
+        matches.append(cn)
+      else:
+        origmissing.append(cn)
+    for cn in newColNames:
+      if cn not in matches:
+        newmissing.append(cn)
+
+    doNotSkip = [self.treeFactorFieldName, self.NOxEmissionFieldName,
+                 self.NO2EmissionFieldName, self.PM10EmissionFieldName,
+                 self.PM25EmissionFieldName, self.isCanyonFieldName,
+                 self.roadWidthFieldName, self.canyonDepthFieldName]
+
+    print('The following columns exist in both road networks, and will be linked.')
+    print(', '.join(matches))
+    print('')
+    for cn in origmissing:
+      if cn in doNotSkip:
+        msg = ('Column "{}" exists in the original road network but is missing '
+               'in the new one.\nPlease specify which column, to match it '
+               'with.').format(cn)
+        fName, v = getFieldName(v, options=newmissing, canIgnore=False, questionString=msg)
+      else:
+        msg = ('Column "{}" exists in the original road network but is missing '
+               'in the new one.\nPlease specify which column, if any, to match it '
+               'with.').format(cn)
+        fName, v = getFieldName(v, options=newmissing, canIgnore=True, questionString=msg)
+      if fName in newmissing:
+        newmissing.remove(fName)
+
+      print('')
+    if len(newmissing):
+      print('The following columns exist only in the new road network, and will be ignored.')
+      print(', '.join(newmissing))
+      print('')
+
+    # Add the columns that were automatically added by the geodataframe setter.
+    for key, value in self.__autoCreatedFields.items():
+      v[key] = value
+
+    self.checkValues(v)
+
+    vall = self.geoDataFrame.copy()
+    vall = vall.append(v, ignore_index=True)
+    vall = canyonDeciderAll(vall, 'roadclass_c', self.isCanyonFieldName, self.roadWidthFieldName, self.canyonDepthFieldName)
+    self.__geoDataFrame = vall
+    print('{} roads imported. There are now {} roads in total.'.format(len(v.index), len(vall.index)))
+    self.CalculateRoadConcentrations()
+
+  def checkValues(self, geodataframe):
+
+    # Test values for tree factor
+    Test = geodataframe[self.treeFactorFieldName]
+    for Tu in Test.unique():
+      if Tu not in self.__allowedTreeFactors:
+        raise ValueError('Tree factor "{}" is not allowed.'.format(str(Tu)))
+
+    # Should add more.
+
+def getFieldName(data, initialFN=None, options=None, defaultName=None, defaultValue=None, name='unnamed', canIgnore=True, questionString=None):
+
+  if options is None:
+    options = list(data)
+  if initialFN is not None:
+    if initialFN in options:
+      # The initial suggestion works. Nothing more to do.
+      return initialFN, data
+
+  if questionString is None:
+    questionString = 'Please select a column to use for field "{}"'.format(name)
+  print(questionString)
+
+  # Need to ask for suggestions.
+  if canIgnore:
+    print('Choose from the following:')
+    optionNums = [str(x) for x in range(len(options)+1)]
+  else:
+    print('This column cannot be ignored.')
+    print('Choose from the following:')
+    optionNums = [str(x+1) for x in range(len(options))]
+  for ci, cn in enumerate(options):
+    print('{:3d}: {:18s}'.format(ci+1, cn), end='')
+    nlneeded = True
+    if (ci+1)%3 == 0:
+      print('')
+      nlneeded = False
+  if canIgnore:
+    print('  0: Ignore this field')
+    nlneeded = False
+
+  defaultNum = -99
+  if defaultName is not None:
+    defaultNum = len(options)+1
+    print('{:3d}: Create a field named "{}" with default value {}.'.format(defaultNum, defaultName, defaultValue))
+    nlneeded = False
+    optionNums.append(str(defaultNum))
+  if nlneeded:
+    print('')
+  num = input("Match column number? ")
+  while num not in optionNums:
+    print('Option not recognised.')
+    num = input("Match column number? ")
+  num = int(num)
+
+  if num == defaultNum:
+    data[defaultName] = defaultValue
+    fName = defaultName
+  elif num == 0:
+    fName = None
+  else:
+    fName = options[num-1]
+
+  return fName, data
 
 def canyonDeciderAll(DF, newColName, IsCanyonFN, CanyonDepthFN, CanyonWidthFN):
   if all([CanyonDepthFN, CanyonWidthFN]):
@@ -434,16 +524,23 @@ def canyonDecider(IsCanyon, CanyonDepth, CanyonWidth):
 
 
 if __name__ == '__main__':
-  rdsshpfile = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
-             "Glasgow\Eddy\SourceFiles\GlasgowTracsisCentreT_wEmissions2017.shp")
+  rdsshpfile = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\Glasgow\\"
+                "Glasgow_AllRoads_wEmissions2017.shp")
   background = {'NO2': 25.5, 'NOx': 42.0, 'O3':38.6, 'PM10': 0, 'PM25': 0}
 
-  RN = RoadNetwork(rdsshpfile)
+  # Start with the Central Glasgow file
+  RN = RoadNetwork(rdsshpfile, isCanyonFieldName='IsCanyon',
+                   roadWidthFieldName='WIDTH', canyonDepthFieldName='CANYON',
+                   averageWindSpeed=4)
   RN.backgroundConcentration = background
 
   ptsshpfile = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
                 "Glasgow\Eddy\SourceFiles\outputPoints.shp")
 
+  RN.CalculateRoadConcentrations(distance='RoadCentre', distanceAdd=12, distanceMultiply=1)
 
+  saveloc = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
+             "Glasgow\Eddy\SourceFiles\GlasgowDutch2017.shp")
+  RN.toFile(saveloc)
   CP = RN.CalculatePointConcentrations(ptsshpfile)
-  print(CP)
+  #print(CP)
