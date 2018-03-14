@@ -2,13 +2,10 @@
 """
 SRM1 Road Network
 
-
-
-
 Created on Tue Oct 04 12:15:08 2016
 @author: edward.barratt
 """
-from os import path
+#from os import path
 
 import pandas as pd
 import geopandas as gpd
@@ -17,11 +14,11 @@ from shapely.geometry import Point
 #from VehicleCounts import VehicleCounts
 #from EmissionFactors import EmissionFactorClass
 
-__notACanyonOptions = ['n', 'no', 'notacanyon', 'not a canyon']
+__notACanyonOptions = ['n', 'no', 'notacanyon', 'not a canyon', 'no canyon']
 __oneSidedCanyonOptions = ['1-sided', '1sided', 'onesidedcanyon', 'one sided canyon']
 __wideCanyonOptions = ['widecanyon', 'wide canyon']
 __narrowCanyonOptions = ['narrowcanyon', 'narrow canyon']
-__decideCanyonOptions = ['y', 'yes']
+__decideCanyonOptions = ['y', 'yes', '2-sided', 'complex canyon']
 
 class RoadNetwork(object):
   """
@@ -251,6 +248,9 @@ class RoadNetwork(object):
   ## Some helper functions for setting up the geodataframe.
 
   def checkValues(self, geodataframe):
+    """
+    Check the values within key columns of a geodataframe.
+    """
     # Test values for tree factor
     Test = geodataframe[self.treeFactorFieldName]
     for Tu in Test.unique():
@@ -258,15 +258,29 @@ class RoadNetwork(object):
         raise ValueError('Tree factor "{}" is not allowed.'.format(str(Tu)))
     # Should add more tests.
 
-
-
-
-
-
-
-
   def CalculatePointConcentrations(self, points, saveloc=None, head=False):
+    """
+    Calculate the pollutant concentrations at a set of points.
 
+    Args:
+      points(str, or geopandas dataframe): A geopandas dataframe containing
+                            the points where the concentration is to be
+                            calculated. It must contain a 'geometry' field.
+                            If provided as a string, then the string will be
+                            assumed to be a path to a shapefile and the
+                            geoDataFrame will be read from the shape file.
+      saveloc(str, optional): The path where the output shapefile should be
+                            saved. The output shape file will have the same
+                            fields as the input geodataframe, plus a 'PEC_XX'
+                            and 'PC_XX' field for each pollutant. If not
+                            specified the saveloc will be the same as the input
+                            shapefile with '_conc' appended to the filename, or
+                            if points was a geopandas dataframe and not a
+                            shapefile, then the points will not be saved.
+
+    Outputs:
+
+    """
     if isinstance(points, str):
       # Assume it's a shape file.
       prj_file = points.replace('.shp', '.prj')
@@ -536,7 +550,10 @@ def canyonDecider(IsCanyon, CanyonDepth, CanyonWidth):
   elif IsCanyon.lower() in __narrowCanyonOptions:
     return 'NarrowCanyon'
   elif IsCanyon.lower() in __decideCanyonOptions:
-    if all([CanyonDepth, CanyonWidth]):
+    if CanyonDepth < 1:
+      return 'NotACanyon'
+    elif all([CanyonDepth, CanyonWidth]):
+      # If we have both canyon depth and canyon width.
       decider = CanyonWidth/(2*CanyonDepth)
       if decider >= 3:
         return 'NotACanyon'
@@ -548,7 +565,7 @@ def canyonDecider(IsCanyon, CanyonDepth, CanyonWidth):
       # Default is NarrowCanyon
       return 'NarrowCanyon'
   else:
-    raise ValueError('IsCanyon value {} is not understood.'.format(IsCanyon))
+    raise ValueError('IsCanyon value "{}" is not understood.'.format(IsCanyon))
 
 def getFieldName(data, initialFN=None, options=None, defaultName=None, defaultValue=None, name='unnamed', canIgnore=True, questionString=None):
 
@@ -606,23 +623,45 @@ def getFieldName(data, initialFN=None, options=None, defaultName=None, defaultVa
   return fName, data
 
 if __name__ == '__main__':
-  rdsshpfile = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\Glasgow\\"
-                "Glasgow_AllRoads_wEmissions2017.shp")
-  background = {'NO2': 25.5, 'NOx': 42.0, 'O3':38.6, 'PM10': 0, 'PM25': 0}
+  # Glasgow
+  #rdsshpfile = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\Glasgow\\"
+  #              "Glasgow_AllRoads_wEmissions2017.shp")
+  #background = {'NO2': 25.5, 'NOx': 42.0, 'O3':38.6, 'PM10': 0, 'PM25': 0}
+  #
+  # Start with the Central Glasgow file
+  #RN = RoadNetwork(rdsshpfile, isCanyonFieldName='IsCanyon',
+  #                 roadWidthFieldName='WIDTH', canyonDepthFieldName='CANYON',
+  #                 averageWindSpeed=4)
+  #RN.backgroundConcentration = background
+  #
+  #ptsshpfile = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
+  #              "Glasgow\Eddy\SourceFiles\outputPoints.shp")
+
+  #RN.CalculateRoadConcentrations(distance='RoadCentre', distanceAdd=12, distanceMultiply=1)
+  #
+  #saveloc = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
+  #           "Glasgow\Eddy\SourceFiles\GlasgowDutch2017.shp")
+
+  # Edinburgh
+  rdsshpfile = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\Edinburgh\\"
+                "Roads\\RoadsForEMIT\\171129\\171129_EdinburghRoads_ForADMS_v6_JoinTo171128_TrafficData_CW_wEmissions2017.shp")
+  background = {'NO2': 20.0, 'NOx': 28.0, 'O3':46, 'PM10': 10, 'PM25': 7}
 
   # Start with the Central Glasgow file
-  RN = RoadNetwork(rdsshpfile, isCanyonFieldName='IsCanyon',
+  RN = RoadNetwork(rdsshpfile, isCanyonFieldName='TYPE_CANYO',
                    roadWidthFieldName='WIDTH', canyonDepthFieldName='CANYON',
                    averageWindSpeed=4)
   RN.backgroundConcentration = background
 
-  ptsshpfile = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
-                "Glasgow\Eddy\SourceFiles\outputPoints.shp")
+  ptsshpfile = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\"
+                "Edinburgh\\Points\\reducedPoints.shp")
 
-  RN.CalculateRoadConcentrations(distance='RoadCentre', distanceAdd=12, distanceMultiply=1)
+  #RN.CalculateRoadConcentrations(distance='RoadCentre', distanceAdd=12, distanceMultiply=1)
+  #
+  saveloc = ("C:\\Users\\edward.barratt\\Documents\\Modelling\\CAFS\\Edinburgh\\"
+                "Roads\\RoadsForEMIT\\EdinburghDutch2017.shp")
 
-  saveloc = ("\\\sepa-fp-01\DIR SCIENCE\EQ\Oceanmet\Projects\\air\CAFS\\"
-             "Glasgow\Eddy\SourceFiles\GlasgowDutch2017.shp")
+
   RN.toFile(saveloc)
   CP = RN.CalculatePointConcentrations(ptsshpfile)
-  #print(CP)
+
