@@ -2,17 +2,16 @@
 """
 SRM1 Road Network
 
+An implementation of the Dutch SRM1 Urban Air Pollution Model.
+
+
 Created on Tue Oct 04 12:15:08 2016
 @author: edward.barratt
 """
-#from os import path
-
 import pandas as pd
 import geopandas as gpd
 from numpy import zeros_like, ones_like
 from shapely.geometry import Point
-#from VehicleCounts import VehicleCounts
-#from EmissionFactors import EmissionFactorClass
 
 __notACanyonOptions = ['n', 'no', 'notacanyon', 'not a canyon', 'no canyon']
 __oneSidedCanyonOptions = ['1-sided', '1sided', 'onesidedcanyon', 'one sided canyon']
@@ -22,7 +21,8 @@ __decideCanyonOptions = ['y', 'yes', '2-sided', 'complex canyon']
 
 class RoadNetwork(object):
   """
-  An SRM1 RoadNetwork object.
+  An implementation of the Dutch SRM1 Urban Air Pollution Model, based around a
+  road network.
 
   Args:
     geoDataFrame(str, or geopandas dataframe): A geopandas dataframe containing
@@ -113,37 +113,35 @@ class RoadNetwork(object):
   def __init__(self, roadnetwork,
                averageWindSpeed=5,
                backgroundConcentration='AllZero',
-               treeFactorFieldName=None,
-               NOxEmissionFieldName=None,
+               canyonDepthFieldName=None,
+               isCanyonFieldName=None,
                NO2EmissionFieldName=None,
+               NOxEmissionFieldName=None,
                PM10EmissionFieldName=None,
                PM25EmissionFieldName=None,
-               isCanyonFieldName=None,
                roadWidthFieldName=None,
-               canyonDepthFieldName=None):
+               treeFactorFieldName=None):
 
     self.__beingCreated = True
 
-    # Get the defaults.
-    self.treeFactorFieldName = treeFactorFieldName
-    self.NOxEmissionFieldName = NOxEmissionFieldName
+    # Get the input parameters.
+    self.averageWindSpeed = averageWindSpeed
+    self.canyonDepthFieldName = canyonDepthFieldName
+    self.isCanyonFieldName = isCanyonFieldName
     self.NO2EmissionFieldName = NO2EmissionFieldName
+    self.NOxEmissionFieldName = NOxEmissionFieldName
     self.PM10EmissionFieldName = PM10EmissionFieldName
     self.PM25EmissionFieldName = PM25EmissionFieldName
-    self.isCanyonFieldName = isCanyonFieldName
     self.roadWidthFieldName = roadWidthFieldName
-    self.canyonDepthFieldName = canyonDepthFieldName
-
-    self.averageWindSpeed = averageWindSpeed
-
+    self.treeFactorFieldName = treeFactorFieldName
 
     # Initiate a pandas dataframe with the correct columns.
     self.geoDataFrame = roadnetwork
     self.backgroundConcentration = backgroundConcentration
     self.__beingCreated = False
-    #self.CalculateEmissions()      # Will create a column 'emissions_Pol' for each pollutant Pol.
-    self.CalculateRoadConcentrations()  # Will create a column 'conc_Pol' for each pollutant Pol.
-    #self.bounds = self.GetBounds()
+
+    self.CalculateRoadConcentrations()  # Will create a 'conc_Pol' column in
+                                        # the road network for every pollutant.
 
   @property
   def geoDataFrame(self):
